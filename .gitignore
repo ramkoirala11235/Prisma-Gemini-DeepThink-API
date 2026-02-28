@@ -1,0 +1,41 @@
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Local machine/user config
+custom_models.json
+
+# Runtime artifacts
+logs/
+checkpoints/
+*.log
+
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*.pyc.*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor/OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Local backup/temp files
+*.bak
+*.bak_*
+*.tmp
