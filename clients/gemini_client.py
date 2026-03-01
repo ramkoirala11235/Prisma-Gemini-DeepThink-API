@@ -229,7 +229,7 @@ async def generate_content(
     text = ""
     thoughts = ""
     if response.candidates and response.candidates[0].content:
-        for part in response.candidates[0].content.parts:
+        for part in (response.candidates[0].content.parts or []):
             if part.thought:
                 thoughts += part.text or ""
             elif part.text:
@@ -354,7 +354,7 @@ async def generate_content_stream(
         thought_chunk = ""
 
         if chunk.candidates and chunk.candidates[0].content:
-            for part in chunk.candidates[0].content.parts:
+            for part in (chunk.candidates[0].content.parts or []):
                 if part.thought:
                     thought_chunk += part.text or ""
                 elif part.text:

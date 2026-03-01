@@ -17,6 +17,16 @@ from pydantic import BaseModel, Field
 
 ThinkingLevel = Literal["minimal", "low", "medium", "high"]
 PipelineMode = Literal["classic", "refinement"]
+RefinementPhase = Literal[
+    "planning",  # 规划阶段
+    "experts",  # 精修专家并行执行 + 规范审核
+    "draft",  # 初稿生成
+    "review",  # 审查初稿
+    "improvers",  # 改进专家并行执行
+    "merge",  # 综合助手合并
+    "apply",  # 应用精修到初稿
+    "output",  # 输出最终结果
+]
 AppState = Literal[
     "idle", "analyzing", "experts_working", "reviewing", "synthesizing", "completed"
 ]
@@ -144,6 +154,13 @@ class DeepThinkCheckpoint(BaseModel):
     pipeline_mode: PipelineMode = "classic"
     draft_content: str = ""  # 初稿内容
     refinement_round: int = 0  # 当前精修迭代轮数
+    refinement_phase: RefinementPhase = "planning"  # 精修细粒度阶段
+    # 精修专家输出列表，每项为 {role, domain, content}
+    refinement_expert_outputs: list[dict] = Field(default_factory=list)
+    # 改进专家结果列表，每项为 {role, analysis, operations: [...]}
+    refinement_improver_results: list[dict] = Field(default_factory=list)
+    # 综合助手合并摘要
+    refinement_merge_summary: str = ""
 
 
 # --- 精修流程数据模型 ---

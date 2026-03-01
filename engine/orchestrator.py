@@ -37,6 +37,7 @@ from prompts import (
     MSG_ROUND_ASSIGNED,
     MSG_SYNTHESIS_START,
     SYNTHESIS_FALLBACK_TEXT,
+    REFINEMENT_FALLBACK_TEXT,
     format_expert_task,
 )
 
@@ -399,7 +400,7 @@ async def _pipeline(
             if result.status == "completed":
                 await _emit_text_notice(MSG_EXPERT_DONE.format(expert_name=result.role))
                 if result.content:
-                    await queue.put(("", f"```content\n{result.content}\n```\n", "experts", []))
+                    await queue.put(("", f"\n```content\n{result.content}\n```\n", "experts", []))
             else:
                 await _emit_text_notice(MSG_EXPERT_ERROR.format(expert_name=result.role))
 
@@ -734,7 +735,9 @@ async def run_deep_think(
             return
         text_chunk, thought_chunk, phase, _grounding = item
         is_fallback_error_chunk = (
-            phase == "system_error" and text_chunk == SYNTHESIS_FALLBACK_TEXT
+            phase == "system_error"
+            and (text_chunk == SYNTHESIS_FALLBACK_TEXT
+                 or text_chunk == REFINEMENT_FALLBACK_TEXT)
         )
         if text_chunk and not is_fallback_error_chunk:
             resume_checkpoint.output_content += text_chunk

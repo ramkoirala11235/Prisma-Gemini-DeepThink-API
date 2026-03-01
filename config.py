@@ -262,7 +262,7 @@ class VirtualModel:
 
 # 注册所有虚拟模型（这里不包括env的）
 VIRTUAL_MODELS: list[VirtualModel] = [
-    # 快速测试用的型
+    # 快速测试用的
     VirtualModel(
         id="gemini-3-flash-deepthink-test",
         real_model="gemini-3-flash-preview",
@@ -360,6 +360,59 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         synthesis_level="high",
         max_rounds=10,
         desc="3.1 Pro + High budget + 最多10轮极限审查。慎用，耗时可能很长。",
+    ),
+    # 精修测试用
+    # {
+    #     "id": "gemini-3.1-pro-refinement-medium",
+    #     "real_model": "gemini-3.1-pro-preview",
+    #     "manager_model": "gemini-3.1-pro-preview",
+    #     "synthesis_model": "gemini-3.1-pro-preview",
+    #     "compliance_model": "gemini-3-flash-preview",
+    #     "json_repair_model": "gemini-3-flash-preview",
+    #     "mode": "refinement",
+    #     "planning_level": "high",
+    #     "expert_level": "high",
+    #     "synthesis_level": "high",
+    #     "refinement_max_rounds": 2,
+    #     "compliance_check_max_retries": 1,
+    #     "enable_json_repair": false,
+    #     "max_rounds": 1,
+    #     "desc": "3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    # }
+    VirtualModel(
+        id="gemini-3.1-pro-refinement-medium",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        compliance_model="gemini-3-flash-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=2,
+        compliance_check_max_retries=0,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    # 快速精修测试flash
+    VirtualModel(
+        id="gemini-3-flash-refinement-medium",
+        real_model="gemini-3-flash-preview",
+        manager_model="gemini-3-flash-preview",
+        synthesis_model="gemini-3-flash-preview",
+        compliance_model="gemini-3-flash-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=2,
+        compliance_check_max_retries=0,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Flash 精修流程实验模式，侧重写作精修改进"
     ),
 ]
 

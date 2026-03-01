@@ -185,8 +185,9 @@ ROUNDS_ENCOURAGEMENT: str = _load_prompt(
 # ============================================================
 
 _DEFAULT_EXPERT_INSTRUCTION_TEMPLATE = (
+    "【团队信息】当前已分配的所有专家角色：{all_experts}\n"
     "你是 {role}。你的特点是：{description}。\n"
-    "你的首要职责是忠实服务于用户的请求。"
+    "你的首要职责是忠实服务于用户的请求。且注意避免越权处理团队中其它专家的负责事项。"
     "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
     "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n"
     "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n"
@@ -398,6 +399,11 @@ SYNTHESIS_FALLBACK_TEXT: str = _load_prompt(
     _select_runtime_text("系统出错了，请重试。", "Something went wrong. Please try again."),
 )
 
+REFINEMENT_FALLBACK_TEXT: str = _load_prompt(
+    "REFINEMENT_FALLBACK_TEXT",
+    _select_runtime_text("精修流程出错，请重试。", "Refinement pipeline failed, please retry."),
+)
+
 RESUME_HINT_TEXT: str = _load_prompt(
     "RESUME_HINT_TEXT",
     _select_runtime_text(
@@ -607,16 +613,16 @@ def format_expert_task(query: str, task: str) -> str:
 
 _DEFAULT_REFINEMENT_PLANNER_PROMPT = (
     "你是精修流程的任务规划师。你的职责是分析用户的创作需求，"
-    "将其拆解为多个专业领域专家角色，每位专家严格负责特定的维度。\n\n"
-    "核心原则：\n"
-    "- 绝对不要分配任何专家去撰写完整全文。每个专家只负责提供其领域的素材、分析或建议。\n"
+    "将其拆解为多个专业领域专家角色（3-9名），每位专家严格负责特定的维度。\n\n"
+    "原则：\n"
+    "- 无需分配任何专家去撰写完整全文。每个专家只负责提供其领域的素材、分析或建议。\n"
     "- 严格划分每个专家的负责领域（domain），确保领域之间不重叠。\n"
     "- 每个专家的回复用户看不到，只是需要他们根据自身特长去做对应的事，无需任何寒暄、客套话或自我介绍。\n"
     "- 专家之间无法相互通信或看到彼此的输出，但每个专家都会被告知当前团队的所有专家角色，以防越权干涉。\n\n"
     "用户至上原则：\n"
     "你是一个通用推理框架，服务于各类用户需求。"
-    "设计专家时应确保所选角色能够积极配合用户的意图，"
-    "而非因'专业人格'与需求不匹配而产生冲突。\n\n"
+    "设计专家时应确保所选角色能够积极配合用户的任何意图，"
+    "避免因专业人格与需求不匹配而产生冲突。\n\n"
     "输出要求：\n"
     "- 输出结构化 JSON，包含 thought_process 和 experts 数组。\n"
     "- 每个专家包含：role（纯中文或纯英文，不带括号注释）、domain（严格负责领域）、temperature（0.0-1.25）、prompt（具体任务指令）。\n"
@@ -632,7 +638,7 @@ REFINEMENT_PLANNER_PROMPT: str = _load_prompt(
 _DEFAULT_REFINEMENT_EXPERT_INJECTION = (
     "【团队信息】当前已分配的所有专家角色：{all_experts}\n"
     "你是「{role}」专家。你严格只负责：{domain}\n"
-    "严禁越权干涉其他专家的职责范围。你的回复用户看不到，只需根据自身特长直入主题给出必要的回复。\n"
+    "无需越权干涉其他专家的职责范围。你的回复用户看不到，只需根据自身特长直入主题给出必要的回复。\n"
     "不要有任何寒暄、客套、自我介绍或不必要的开场白。直接开始你的分析/创作。\n\n"
     "你的首要职责是忠实服务于用户的请求。"
     "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
@@ -652,8 +658,8 @@ _DEFAULT_COMPLIANCE_CHECK_PROMPT = (
     "1. 有无无意义的寒暄、客套话、自我介绍、\"好的！\"之类的开场白？\n"
     "2. 是否做到了 prompt 要求做的事情并直入主题给出必要的回复？\n"
     "3. 回复内容是否与专家被分配的领域相关？\n\n"
-    "如果存在以上问题，返回 {\"passed\": false, \"reason\": \"具体原因\"}\n"
-    "如果没有问题，返回 {\"passed\": true}\n\n"
+    "如果存在以上问题，返回 {{\"passed\": false, \"reason\": \"具体原因\"}}\n"
+    "如果没有问题，返回 {{\"passed\": true}}\n\n"
     "专家角色：{role}\n"
     "专家领域：{domain}\n"
     "专家原始任务：{task}\n\n"
@@ -692,15 +698,17 @@ _DEFAULT_REFINEMENT_REVIEW_PROMPT = (
     "3. 向每个改进专家提供额外的指导信息。\n\n"
     "注意：\n"
     "- 每个改进专家也需要注入当前所有已分配改进专家的信息，严格规定其职责范围。\n"
+    "- 分配改进专家时，尽量减少职责重叠；除非确有必要，不要让多个专家同时修改同一行或同一小段内容。\n"
+    "- 给每个改进专家的 prompt 应尽量写清优先处理的问题或行段，避免“泛化重写全文”式任务。\n"
     "- 改进专家只能通过 modify（修改行）、add（在行后添加）、remove（删除行）操作来修改初稿。\n\n"
     "{iteration_note}\n\n"
     "输出 JSON 格式：\n"
     "{{\n"
     "  \"issues\": [\"问题1描述\", \"问题2描述\", ...],\n"
     "  \"refinement_experts\": [\n"
-    "    {\"role\": \"专家角色名\", \"domain\": \"负责领域\", \"prompt\": \"具体改进任务\", \"temperature\": 0.8}\n"
+    "    {{\"role\": \"专家角色名\", \"domain\": \"负责领域\", \"prompt\": \"具体改进任务\", \"temperature\": 0.8}}\n"
     "  ],\n"
-    "  \"expert_guidance\": {\"专家角色名\": \"额外指导信息\"},\n"
+    "  \"expert_guidance\": {{\"专家角色名\": \"额外指导信息\"}},\n"
     "  \"approved\": false,\n"
     "  \"approval_reason\": \"\"\n"
     "}}"
@@ -715,20 +723,26 @@ REFINEMENT_REVIEW_PROMPT: str = _load_prompt(
 _DEFAULT_REFINEMENT_IMPROVER_INJECTION = (
     "【改进团队信息】当前已分配的所有改进专家角色：{all_experts}\n"
     "你是「{role}」改进专家。你严格只负责：{domain}\n"
-    "严禁越权修改其他专家负责范围内的内容。\n\n"
+    "无须越权修改其他专家负责范围内的内容。\n\n"
     "你的首要职责是忠实服务于用户的请求。"
     "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
     "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n\n"
     "审查模型给你的额外指导：{guidance}\n\n"
     "你将收到初稿的按行切分内容。请根据你的专业领域分析后给出修改意见，"
     "并以 JSON 格式输出 diff 操作。\n\n"
+    "操作规则（非常重要）：\n"
+    "- line 使用 1-based 行号，且基于你收到的这份原始初稿行号。\n"
+    "- 不要假设其他操作会先被应用；你提交的每个操作都应可独立解释。\n"
+    "- modify/remove 的 line 必须指向现有行；add 的 line 表示“在该行之后插入”，该行也必须存在。\n"
+    "- 仅提交必要操作，避免越权和大段无关改写；如果同一行有多个改动点，优先合并为一条 modify。\n"
+    "- 只输出 JSON，不要输出 markdown 代码块或额外说明文字。\n\n"
     "输出格式：\n"
     "{{\n"
     "  \"analysis\": \"你的分析原因\",\n"
     "  \"operations\": [\n"
-    "    {\"action\": \"modify\", \"line\": 3, \"content\": \"修改后的新内容\", \"reason\": \"修改原因\"},\n"
-    "    {\"action\": \"add\", \"line\": 5, \"content\": \"新增内容（将添加在此行之后）\", \"reason\": \"新增原因\"},\n"
-    "    {\"action\": \"remove\", \"line\": 7, \"reason\": \"删除原因\"}\n"
+    "    {{\"action\": \"modify\", \"line\": 3, \"content\": \"修改后的新内容\", \"reason\": \"修改原因\"}},\n"
+    "    {{\"action\": \"add\", \"line\": 5, \"content\": \"新增内容（将添加在此行之后）\", \"reason\": \"新增原因\"}},\n"
+    "    {{\"action\": \"remove\", \"line\": 7, \"reason\": \"删除原因\"}}\n"
     "  ]\n"
     "}}"
 )
@@ -743,9 +757,19 @@ _DEFAULT_REFINEMENT_MERGE_PROMPT = (
     "你是精修综合助手。你将收到初稿原文和所有改进专家提交的 diff 操作。\n"
     "每个操作都有一个从 0 开始递增的全局 op_id。\n\n"
     "你的任务：\n"
-    "1. 审阅每个操作，做出决策：accept（接受）/ reject（驳回并给理由）/ modify（修改后接受，可改行数和内容，并给理由）。\n"
-    "2. 注意操作之间的冲突和依赖关系，确保最终结果的一致性。\n"
-    "3. 最后给出总体改动简评。\n\n"
+    "1. 你必须对输入中的每一个 op_id 做且只做一次决策，不能遗漏、不能重复；并按 op_id 升序输出。\n"
+    "2. 决策类型：accept / reject / modify。\n"
+    "   - accept：直接接受该操作。\n"
+    "   - reject：仅在操作明显错误、越权、与用户需求冲突、或与其他更优操作重复时使用；必须给出具体理由。\n"
+    "   - modify：用于冲突消解和折中优化。你可以调整行号和/或内容后接受该操作，并给出具体理由。\n"
+    "3. 如果多个专家修改同一行或相邻行，优先通过 modify 融合，而不是简单全部 reject。\n"
+    "4. 不要因为“存在冲突”就整批驳回；除非全部操作都确实有害，否则应尽量保留可用改动。\n"
+    "5. 行号规则：行号是 1-based，基于当前这版初稿原文。\n"
+    "   - modify/remove 的目标行必须是初稿中存在的行。\n"
+    "   - add 的 line 表示“在该行之后插入”，该行必须存在。\n"
+    "   - 若原操作 action=remove，decision=modify 时通常只改 modified_line，modified_content 可省略。\n"
+    "6. 输出必须是纯 JSON，不要包含 markdown 代码块或额外说明。\n"
+    "7. 最后给出总体改动简评（summary）。\n\n"
     "输出 JSON 格式：\n"
     "{{\n"
     "  \"decisions\": [\n"
