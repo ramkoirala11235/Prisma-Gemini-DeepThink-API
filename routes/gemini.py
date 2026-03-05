@@ -121,9 +121,14 @@ def _parse_gemini_request(body: dict[str, Any]) -> tuple[
     gen_config = body.get("generationConfig", {})
     temperature = gen_config.get("temperature")
 
-    # 提取 thinkingConfig.includeThoughts，默认 True
-    thinking_config = gen_config.get("thinkingConfig", {})
-    include_thoughts: bool = thinking_config.get("includeThoughts", True)
+    # 提取 thinkingConfig.includeThoughts
+    # 没有 thinkingConfig -> 下游不关心思维链，默认 False
+    # 有 thinkingConfig 但没指定 includeThoughts -> 默认 True
+    thinking_config = gen_config.get("thinkingConfig")
+    if thinking_config is not None:
+        include_thoughts = thinking_config.get("includeThoughts", True)
+    else:
+        include_thoughts = False
 
     # system_instruction
     sys_instr = body.get("systemInstruction")
