@@ -196,8 +196,8 @@ CHECKPOINT_REPLAY_CHUNK_SIZE: int = int(
 # --- 思考预算定义 ---
 
 THINKING_BUDGETS = {
-    "minimal": 1024,
-    "low": 4096,  # \
+    "minimal": 15360,
+    "low": 15360,  # \
     "medium": 15360,
     "high": 32768,
     "high_pro": 32768,  # \w

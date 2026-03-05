@@ -108,17 +108,22 @@ def _resolve_request_config(
 # ---------------------------------------------------------------------------
 
 def _parse_gemini_request(body: dict[str, Any]) -> tuple[
-    str, str, list[dict[str, str]], list[dict], str | None, float | None
+    str, str, list[dict[str, str]], list[dict], str | None, float | None, bool
 ]:
     """Parse a Gemini generateContent request body.
 
     Returns:
-        (model, query, history, image_parts, system_instruction, temperature)
+        (model, query, history, image_parts, system_instruction, temperature,
+         include_thoughts)
     """
     model = body.get("model", "")
     contents = body.get("contents", [])
     gen_config = body.get("generationConfig", {})
     temperature = gen_config.get("temperature")
+
+    # 提取 thinkingConfig.includeThoughts，默认 True
+    thinking_config = gen_config.get("thinkingConfig", {})
+    include_thoughts: bool = thinking_config.get("includeThoughts", True)
 
     # system_instruction
     sys_instr = body.get("systemInstruction")
@@ -165,7 +170,7 @@ def _parse_gemini_request(body: dict[str, Any]) -> tuple[
         query = history[-1]["content"]
         history = history[:-1]
 
-    return model, query, history, image_parts, system_text, temperature
+    return model, query, history, image_parts, system_text, temperature, include_thoughts
 
 
 def _build_gemini_response(
@@ -310,7 +315,7 @@ async def _gemini_sse_stream(
     body: dict[str, Any],
 ) -> AsyncGenerator[str, None]:
     """Generate Gemini-native SSE stream."""
-    model_id, query, history, image_parts, system_text, temperature = (
+    model_id, query, history, image_parts, system_text, temperature, include_thoughts = (
         _parse_gemini_request(body)
     )
 
@@ -357,11 +362,12 @@ async def _gemini_sse_stream(
     all_grounding: list[dict] = []
 
     try:
-        # resume hint as the first thought chunk
-        hint_chunk = _build_gemini_stream_chunk(
-            thought=_resume_hint(checkpoint.resume_id),
-        )
-        yield f"data: {json.dumps(hint_chunk, ensure_ascii=False)}\n\n"
+        # resume hint as the first thought chunk (only if thoughts requested)
+        if include_thoughts:
+            hint_chunk = _build_gemini_stream_chunk(
+                thought=_resume_hint(checkpoint.resume_id),
+            )
+            yield f"data: {json.dumps(hint_chunk, ensure_ascii=False)}\n\n"
 
         async for text_chunk, thought_chunk, _phase, grounding in run_deep_think(
             query=query,
@@ -381,10 +387,13 @@ async def _gemini_sse_stream(
             if grounding:
                 all_grounding.extend(grounding)
 
-            if text_chunk or thought_chunk:
+            # 如果不需要思维链，过滤掉 thought 内容
+            effective_thought = thought_chunk if include_thoughts else ""
+
+            if text_chunk or effective_thought:
                 chunk_data = _build_gemini_stream_chunk(
                     text=text_chunk,
-                    thought=thought_chunk,
+                    thought=effective_thought,
                 )
                 yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
 
@@ -449,7 +458,7 @@ async def generate_content(model_name: str, raw_request: Request):
         json.dumps(body, ensure_ascii=False, indent=2)[:5000],
     )
 
-    model_id, query, history, image_parts, system_text, temperature = (
+    model_id, query, history, image_parts, system_text, temperature, include_thoughts = (
         _parse_gemini_request(body)
     )
 
@@ -496,7 +505,7 @@ async def generate_content(model_name: str, raw_request: Request):
             )
 
     full_text = ""
-    full_reasoning = _resume_hint(checkpoint.resume_id)
+    full_reasoning = _resume_hint(checkpoint.resume_id) if include_thoughts else ""
     all_grounding: list[dict] = []
 
     async for text_chunk, thought_chunk, _phase, grounding in run_deep_think(
@@ -515,7 +524,8 @@ async def generate_content(model_name: str, raw_request: Request):
         stage_providers=stage_providers,
     ):
         full_text += text_chunk
-        full_reasoning += thought_chunk
+        if include_thoughts:
+            full_reasoning += thought_chunk
         if grounding:
             all_grounding.extend(grounding)
 
