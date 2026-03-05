@@ -39,3 +39,4 @@ Thumbs.db
 *.bak
 *.bak_*
 *.tmp
+routes/gemini copy.py

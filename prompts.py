@@ -787,7 +787,7 @@ _DEFAULT_REFINEMENT_CLEANER_PROMPT = (
     "1. 只输出 JSON，不要输出 markdown、代码块或其他解释文字。\n"
     "2. 输出格式：\n"
     "{\n"
-    "  \"analysis\": \"你的简短分析（可为空）\",\n"
+    "  \"analysis\": \"你的简短分析\",\n"
     "  \"operations\": [\n"
     "    {\"action\": \"remove\", \"line\": 12, \"reason\": \"删除相邻重复\"},\n"
     "    {\"action\": \"modify\", \"line\": 20, \"content\": \"修改后的整行文本\", \"reason\": \"删减重复部分\"}\n"
