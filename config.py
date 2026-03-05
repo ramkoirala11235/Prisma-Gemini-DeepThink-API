@@ -1,4 +1,4 @@
-"""Prisma DeepThink 配置模块.
+﻿"""Prisma DeepThink 配置模块.
 
 模型注册表、Thinking Budget 计算、环境变量加载。
 通过虚拟模型名（如 gemini-3-pro-deepthink-high）映射到实际模型 + 思考预算。
@@ -196,8 +196,8 @@ CHECKPOINT_REPLAY_CHUNK_SIZE: int = int(
 # --- 思考预算定义 ---
 
 THINKING_BUDGETS = {
-    "minimal": 1024,
-    "low": 4096,  # \
+    "minimal": 15360,
+    "low": 15360,  # \
     "medium": 15360,
     "high": 32768,
     "high_pro": 32768,  # \w
@@ -224,6 +224,20 @@ def get_thinking_budget(level: str, model: str) -> int:
 
 
 @dataclass
+class StageProviders:
+    """各阶段使用的 Provider."""
+
+    manager: str
+    expert: str
+    synthesis: str
+
+    @classmethod
+    def from_single(cls, provider: str) -> "StageProviders":
+        """使用同一个 provider 填充三个阶段."""
+        return cls(manager=provider, expert=provider, synthesis=provider)
+
+
+@dataclass
 class VirtualModel:
     """虚拟模型定义：对外暴露的模型名 -> 实际模型 + 思考预算.
 
@@ -243,16 +257,32 @@ class VirtualModel:
     manager_model: Optional[str] = None    # Manager 专用模型（None则复用 real_model）
     synthesis_model: Optional[str] = None  # Synthesis 专用模型（None则复用 real_model）
     provider: str = ""  # LLM provider 标识符（空字符串则使用全局 LLM_PROVIDER）
+    manager_provider: Optional[str] = None  # 规划/Review阶段 provider
+    expert_provider: Optional[str] = None   # Expert/执行阶段 provider
+    synthesis_provider: Optional[str] = None  # 综合/合并阶段 provider
     # 各阶段温度覆盖（None = 不覆盖，使用请求温度或 Manager 分配温度）
     planning_temperature: Optional[float] = None
     expert_temperature: Optional[float] = None
     review_temperature: Optional[float] = None
     synthesis_temperature: Optional[float] = None
+    # 开启后，会在结构化 JSON 请求里额外通过 prompt 强制约束输出格式
+    # 用于兼容不稳定或不支持 response_format 的 OpenAI 兼容渠道
+    json_via_prompt: bool = False
+    # --- 精修流程专用字段 ---
+    mode: str = "classic"  # "classic" 或 "refinement"
+    draft_model: Optional[str] = None  # 初稿生成模型
+    review_model: Optional[str] = None  # 审查阶段模型
+    merge_model: Optional[str] = None  # 综合助手模型
+    json_repair_model: Optional[str] = None  # JSON 修复模型
+    refinement_max_rounds: int = 2  # 精修最大迭代轮数
+    pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
+    enable_json_repair: bool = False  # 是否启用 JSON 修复
+    enable_text_cleaner: bool = True  # 是否启用末端文本清洗专家（默认启用）
 
 
 # 注册所有虚拟模型（这里不包括env的）
 VIRTUAL_MODELS: list[VirtualModel] = [
-    # 快速测试用的型
+    # 快速测试用的
     VirtualModel(
         id="gemini-3-flash-deepthink-test",
         real_model="gemini-3-flash-preview",
@@ -350,6 +380,104 @@ VIRTUAL_MODELS: list[VirtualModel] = [
         synthesis_level="high",
         max_rounds=10,
         desc="3.1 Pro + High budget + 最多10轮极限审查。慎用，耗时可能很长。",
+    ),
+    # 精修测试用
+    # {
+    #     "id": "gemini-3.1-pro-refinement-medium",
+    #     "real_model": "gemini-3.1-pro-preview",
+    #     "manager_model": "gemini-3.1-pro-preview",
+    #     "synthesis_model": "gemini-3.1-pro-preview",
+    #     "json_repair_model": "gemini-3-flash-preview",
+    #     "mode": "refinement",
+    #     "planning_level": "high",
+    #     "expert_level": "high",
+    #     "synthesis_level": "high",
+    #     "refinement_max_rounds": 2,
+    #     "pre_draft_review_rounds": 1,
+    #     "enable_json_repair": false,
+    #     "max_rounds": 1,
+    #     "desc": "3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    # }
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-low",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=1,
+        pre_draft_review_rounds=0,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-medium",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=2,
+        pre_draft_review_rounds=1,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-high",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=3,
+        pre_draft_review_rounds=2,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    VirtualModel(
+        id="gemini-3.1-pro-deepthink-refinement-extra",
+        real_model="gemini-3.1-pro-preview",
+        manager_model="gemini-3.1-pro-preview",
+        synthesis_model="gemini-3.1-pro-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=4,
+        pre_draft_review_rounds=3,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Pro 精修流程实验模式，侧重写作精修改进"
+    ),
+    # 快速精修测试flash
+    VirtualModel(
+        id="gemini-3-flash-deepthink-refinement-medium",
+        real_model="gemini-3-flash-preview",
+        manager_model="gemini-3-flash-preview",
+        synthesis_model="gemini-3-flash-preview",
+        json_repair_model="gemini-3-flash-preview",
+        mode="refinement",
+        planning_level="high",
+        expert_level="high",
+        synthesis_level="high",
+        refinement_max_rounds=2,
+        pre_draft_review_rounds=1,
+        enable_json_repair=False,
+        max_rounds=1,
+        desc="3.1 Flash 精修流程实验模式，侧重写作精修改进"
     ),
 ]
 
@@ -457,10 +585,23 @@ def _load_extra_virtual_models() -> list[VirtualModel]:
                 manager_model=item.get("manager_model"),
                 synthesis_model=item.get("synthesis_model"),
                 provider=item.get("provider", ""),
+                manager_provider=item.get("manager_provider"),
+                expert_provider=item.get("expert_provider"),
+                synthesis_provider=item.get("synthesis_provider"),
                 planning_temperature=item.get("planning_temperature"),
                 expert_temperature=item.get("expert_temperature"),
                 review_temperature=item.get("review_temperature"),
                 synthesis_temperature=item.get("synthesis_temperature"),
+                json_via_prompt=item.get("json_via_prompt", False),
+                mode=item.get("mode", "classic"),
+                draft_model=item.get("draft_model"),
+                review_model=item.get("review_model"),
+                merge_model=item.get("merge_model"),
+                json_repair_model=item.get("json_repair_model"),
+                refinement_max_rounds=item.get("refinement_max_rounds", 2),
+                pre_draft_review_rounds=item.get("pre_draft_review_rounds", 1),
+                enable_json_repair=item.get("enable_json_repair", False),
+                enable_text_cleaner=item.get("enable_text_cleaner", True),
             )
             models.append(vm)
             logger.info(
@@ -525,16 +666,19 @@ _VIRTUAL_MODEL_MAP: dict[str, VirtualModel] = {
 _ResolveResult = tuple[
     str, str, str,               # real_model, manager_model, synthesis_model
     str, str, str,               # planning_level, expert_level, synthesis_level
-    int, str,                    # max_rounds, provider
+    int, str,                    # max_rounds, legacy single provider
     Optional[float],             # planning_temperature
     Optional[float],             # expert_temperature
     Optional[float],             # review_temperature
     Optional[float],             # synthesis_temperature
+    str,                         # mode ("classic" / "refinement")
+    bool,                        # json_via_prompt
+    StageProviders,              # stage_providers (manager/expert/synthesis)
 ]
 
 
 def resolve_model(model_id: str) -> _ResolveResult:
-    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider 和温度覆盖.
+    """解析虚拟模型名，返回各阶段实际模型、思考预算、最大轮数、provider、温度覆盖、mode、JSON 提示增强开关和阶段 provider.
 
     Args:
         model_id: 虚拟模型名或实际模型名.
@@ -544,25 +688,93 @@ def resolve_model(model_id: str) -> _ResolveResult:
          planning_level, expert_level, synthesis_level,
          max_rounds, provider,
          planning_temperature, expert_temperature,
-         review_temperature, synthesis_temperature) 元组.
+         review_temperature, synthesis_temperature,
+         mode, json_via_prompt) 元组.
     """
     vm = _VIRTUAL_MODEL_MAP.get(model_id)
     if vm:
         mgr_model = vm.manager_model or vm.real_model
         syn_model = vm.synthesis_model or vm.real_model
         provider = vm.provider or LLM_PROVIDER
+        stage_providers = StageProviders(
+            manager=vm.manager_provider or provider,
+            expert=vm.expert_provider or provider,
+            synthesis=vm.synthesis_provider or provider,
+        )
         return (
             vm.real_model, mgr_model, syn_model,
             vm.planning_level, vm.expert_level, vm.synthesis_level,
             vm.max_rounds, provider,
             vm.planning_temperature, vm.expert_temperature,
             vm.review_temperature, vm.synthesis_temperature,
+            vm.mode,
+            vm.json_via_prompt,
+            stage_providers,
         )
 
-    # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖
+    # 未注册的模型名，直接透传，默认 high + .env 的 MAX_ROUNDS + 全局 provider + 无温度覆盖 + classic
+    stage_providers = StageProviders.from_single(LLM_PROVIDER)
     return (
         model_id, model_id, model_id,
         "high", "high", "high",
         MAX_ROUNDS, LLM_PROVIDER,
         None, None, None, None,
+        "classic",
+        False,
+        stage_providers,
     )
+
+
+@dataclass
+class RefinementModelConfig:
+    """精修流程各阶段模型配置."""
+    draft_model: str       # 初稿生成模型
+    review_model: str      # 审查模型
+    merge_model: str       # 综合助手模型
+    json_repair_model: str  # JSON 修复模型
+    refinement_max_rounds: int = 2
+    pre_draft_review_rounds: int = 1  # pre-draft review rounds (0=disabled)
+    enable_json_repair: bool = False
+    enable_text_cleaner: bool = True
+
+
+def resolve_refinement_config(
+    model_id: str,
+    real_model: str,
+    mgr_model: str,
+    syn_model: str,
+) -> RefinementModelConfig:
+    """解析虚拟模型精修流程配置.
+
+    Args:
+        model_id: 虚拟模型名.
+        real_model: 已解析的 Expert 模型.
+        mgr_model: 已解析的 Manager 模型.
+        syn_model: 已解析的 Synthesis 模型.
+
+    Returns:
+        RefinementModelConfig 实例.
+    """
+    vm = _VIRTUAL_MODEL_MAP.get(model_id)
+    default_small = "gemini-3-flash-preview"
+
+    if vm:
+        return RefinementModelConfig(
+            draft_model=vm.draft_model or real_model,
+            review_model=vm.review_model or mgr_model,
+            merge_model=vm.merge_model or syn_model,
+            json_repair_model=vm.json_repair_model or default_small,
+            refinement_max_rounds=vm.refinement_max_rounds,
+            pre_draft_review_rounds=vm.pre_draft_review_rounds,
+            enable_json_repair=vm.enable_json_repair,
+            enable_text_cleaner=vm.enable_text_cleaner,
+        )
+
+    return RefinementModelConfig(
+        draft_model=real_model,
+        review_model=mgr_model,
+        merge_model=syn_model,
+        json_repair_model=default_small,
+    )
+
+

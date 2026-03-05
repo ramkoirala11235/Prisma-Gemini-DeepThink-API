@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any, AsyncGenerator, Optional
 
-from config import SSE_HEARTBEAT_INTERVAL, get_thinking_budget
+from config import LLM_PROVIDER, SSE_HEARTBEAT_INTERVAL, StageProviders, get_thinking_budget
 from engine import expert, manager, synthesis
 from models import (
     AnalysisResult,
@@ -37,6 +37,7 @@ from prompts import (
     MSG_ROUND_ASSIGNED,
     MSG_SYNTHESIS_START,
     SYNTHESIS_FALLBACK_TEXT,
+    REFINEMENT_FALLBACK_TEXT,
     format_expert_task,
 )
 
@@ -315,9 +316,37 @@ async def _pipeline(
     resume_checkpoint: DeepThinkCheckpoint | None = None,
     event_callback: EventCallback | None = None,
     resume_mode: bool = False,
+    stage_providers: StageProviders | None = None,
     provider: str = "",
 ) -> None:
     """Run manager/expert/review/synthesis pipeline and push chunks into queue."""
+
+    stage_providers = stage_providers or StageProviders.from_single(
+        provider or LLM_PROVIDER
+    )
+    manager_provider = stage_providers.manager
+    expert_provider = stage_providers.expert
+    synthesis_provider = stage_providers.synthesis
+
+    # --- 精修模式分发 ---
+    if config.mode == "refinement":
+        from engine.refinement.pipeline import run_refinement_pipeline
+        await run_refinement_pipeline(
+            queue=queue,
+            query=query,
+            history=history,
+            model=model,
+            mgr_model=mgr_model,
+            syn_model=syn_model,
+            config=config,
+            temperature=temperature,
+            system_prompt=system_prompt,
+            image_parts=image_parts,
+            resume_checkpoint=resume_checkpoint,
+            stage_providers=stage_providers,
+            provider=manager_provider,
+        )
+        return
     _child_tasks: set[asyncio.Task] = set()
 
     def _spawn(coro: Awaitable[Any]) -> asyncio.Task:
@@ -372,15 +401,21 @@ async def _pipeline(
                 exp,
                 context,
                 budget,
+                all_expert_roles=list(
+                    dict.fromkeys(
+                        e.role for e in all_experts
+                        if e.round == exp.round and e.role
+                    )
+                ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=provider,
+                provider=expert_provider,
             )
 
             if result.status == "completed":
                 await _emit_text_notice(MSG_EXPERT_DONE.format(expert_name=result.role))
                 if result.content:
-                    await queue.put(("", f"```content\n{result.content}\n```\n", "experts", []))
+                    await queue.put(("", f"\n```content\n{result.content}\n```\n", "experts", []))
             else:
                 await _emit_text_notice(MSG_EXPERT_ERROR.format(expert_name=result.role))
 
@@ -450,7 +485,8 @@ async def _pipeline(
                     ),
                     user_system_prompt=system_prompt,
                     image_parts=image_parts,
-                    provider=provider,
+                    provider=manager_provider,
+                    json_via_prompt=config.json_via_prompt,
                 )
             )
             analysis = await manager_task
@@ -519,7 +555,8 @@ async def _pipeline(
                             image_parts=image_parts,
                             remaining_rounds=remaining_rounds,
                             previous_reviews=all_reviews,
-                            provider=provider,
+                            provider=manager_provider,
+                            json_via_prompt=config.json_via_prompt,
                         )
                     )
                     review_result = await review_task
@@ -625,7 +662,7 @@ async def _pipeline(
                 ),
                 user_system_prompt=system_prompt,
                 image_parts=image_parts,
-                provider=provider,
+                provider=synthesis_provider,
             ):
                 await queue.put((text_chunk, thought_chunk, "synthesis", grounding_chunks))
         except Exception as exc:
@@ -669,11 +706,16 @@ async def run_deep_think(
     resume_checkpoint: DeepThinkCheckpoint | None = None,
     event_callback: EventCallback | None = None,
     resume_mode: bool = False,
+    stage_providers: StageProviders | None = None,
     provider: str = "",
 ) -> AsyncGenerator[tuple[str, str, str, list[dict]], None]:
     """Run the complete DeepThink pipeline and stream text/thought chunks."""
     if not config:
         config = DEFAULT_CONFIG
+
+    stage_providers = stage_providers or StageProviders.from_single(
+        provider or LLM_PROVIDER
+    )
 
     mgr_model = manager_model or model
     syn_model = synthesis_model or model
@@ -706,6 +748,7 @@ async def run_deep_think(
             resume_checkpoint,
             event_callback,
             resume_mode,
+            stage_providers,
             provider,
         )
     )
@@ -715,7 +758,9 @@ async def run_deep_think(
             return
         text_chunk, thought_chunk, phase, _grounding = item
         is_fallback_error_chunk = (
-            phase == "system_error" and text_chunk == SYNTHESIS_FALLBACK_TEXT
+            phase == "system_error"
+            and (text_chunk == SYNTHESIS_FALLBACK_TEXT
+                 or text_chunk == REFINEMENT_FALLBACK_TEXT)
         )
         if text_chunk and not is_fallback_error_chunk:
             resume_checkpoint.output_content += text_chunk

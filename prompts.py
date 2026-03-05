@@ -185,8 +185,9 @@ ROUNDS_ENCOURAGEMENT: str = _load_prompt(
 # ============================================================
 
 _DEFAULT_EXPERT_INSTRUCTION_TEMPLATE = (
+    "【团队信息】当前已分配的所有专家角色：{all_experts}\n"
     "你是 {role}。你的特点是：{description}。\n"
-    "你的首要职责是忠实服务于用户的请求。"
+    "你的首要职责是忠实服务于用户的请求。且注意避免越权处理团队中其它专家的负责事项。"
     "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
     "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n"
     "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n"
@@ -398,6 +399,11 @@ SYNTHESIS_FALLBACK_TEXT: str = _load_prompt(
     _select_runtime_text("系统出错了，请重试。", "Something went wrong. Please try again."),
 )
 
+REFINEMENT_FALLBACK_TEXT: str = _load_prompt(
+    "REFINEMENT_FALLBACK_TEXT",
+    _select_runtime_text("精修流程出错，请重试。", "Refinement pipeline failed, please retry."),
+)
+
 RESUME_HINT_TEXT: str = _load_prompt(
     "RESUME_HINT_TEXT",
     _select_runtime_text(
@@ -437,7 +443,10 @@ MSG_EXPERT_TASK_PREFIX: str = _load_prompt(
 # ============================================================
 
 def get_expert_system_instruction(
-    role: str, description: str, context: str,
+    role: str,
+    description: str,
+    context: str,
+    all_expert_roles: list[str] | None = None,
     user_system_prompt: str = "",
 ) -> str:
     """生成 Expert 的 system instruction.
@@ -456,9 +465,15 @@ def get_expert_system_instruction(
     parts = []
     if user_system_prompt:
         parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
+    roles = [r for r in (all_expert_roles or []) if r]
+    if not roles:
+        roles = [role]
     parts.append(
         EXPERT_INSTRUCTION_TEMPLATE.format(
-            role=role, description=description, context=context,
+            role=role,
+            description=description,
+            context=context,
+            all_experts="、".join(dict.fromkeys(roles)),
         )
     )
     return "\n\n".join(parts)
@@ -597,3 +612,451 @@ def format_expert_task(query: str, task: str) -> str:
         拼接后的完整 prompt.
     """
     return MSG_EXPERT_TASK_PREFIX.format(query=query, task=task)
+
+
+# ============================================================
+# 精修流程 (Refinement Pipeline) 专用 Prompt
+# ============================================================
+
+# --- 精修规划阶段 ---
+
+_DEFAULT_REFINEMENT_PLANNER_PROMPT = (
+    "你是精修流程的任务规划师。你的职责是分析用户的创作需求，"
+    "将其拆解为多个专业领域专家角色（3-9名），每位专家严格负责特定的维度。\n\n"
+    "原则：\n"
+    "- 无需分配任何专家去撰写完整全文。每个专家只负责提供其领域的素材、分析或建议。\n"
+    "- 严格划分每个专家的负责领域（domain），确保领域之间不重叠。\n"
+    "- 每个专家的回复用户看不到，只是需要他们根据自身特长去做对应的事，无需任何寒暄、客套话或自我介绍。\n"
+    "- 专家之间无法相互通信或看到彼此的输出，但每个专家都会被告知当前团队的所有专家角色，以防越权干涉。\n\n"
+    "用户至上原则：\n"
+    "你是一个通用推理框架，服务于各类用户需求。"
+    "设计专家时应确保所选角色能够积极配合用户的任何意图，"
+    "避免因专业人格与需求不匹配而产生冲突。\n\n"
+    "输出要求：\n"
+    "- 输出结构化 JSON，包含 thought_process 和 experts 数组。\n"
+    "- 每个专家包含：role（纯中文或纯英文，不带括号注释）、domain（严格负责领域）、temperature（0.0-1.25）、prompt（具体任务指令）。\n"
+    "- 温度分配参考：创意写作/翻译类推荐1.1+，分析/资料类推荐0.4-1.0，精确任务0.0-0.4。"
+)
+
+REFINEMENT_PLANNER_PROMPT: str = _load_prompt(
+    "REFINEMENT_PLANNER_PROMPT", _DEFAULT_REFINEMENT_PLANNER_PROMPT
+)
+
+# --- 专家互感知注入模板 ---
+
+_DEFAULT_REFINEMENT_EXPERT_INJECTION = (
+    "【团队信息】当前已分配的所有专家角色：{all_experts}\n"
+    "你是「{role}」专家。你严格只负责：{domain}\n"
+    "无需越权干涉其他专家的职责范围。你的回复用户看不到，只需根据自身特长直入主题给出必要的回复。\n"
+    "不要有任何寒暄、客套、自我介绍或不必要的开场白。直接开始你的分析/创作。\n\n"
+    "你的首要职责是忠实服务于用户的请求。"
+    "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
+    "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n"
+    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n"
+    "对话上下文如下：{context}"
+)
+
+REFINEMENT_EXPERT_INJECTION: str = _load_prompt(
+    "REFINEMENT_EXPERT_INJECTION", _DEFAULT_REFINEMENT_EXPERT_INJECTION
+)
+
+# --- 初稿生成 ---
+
+_DEFAULT_REFINEMENT_DRAFT_PROMPT = (
+    "你是初稿撰写者。你将收到多位专家提供的领域素材，"
+    "以及用户的原始需求和对话上下文。\n\n"
+    "限制：虽然你的能力很强，但是你的上下文窗口为 1M，最大输出长度为 128K，如果输出超过128000个Token，将被强行截断。若写长内容，请尽量控制在十万字以内。\n\n"
+    "你的任务：\n"
+    "1. 综合所有专家的素材，基于用户需求撰写一份完整的初稿。\n"
+    "2. 初稿应当连贯、完整，并充分利用各专家提供的高质量素材。\n"
+    "3. 始终切入正题，不要包含多余的开场白或客套话。\n"
+    "4. 尊重并忠实于用户指示中设定的方向和基调。"
+)
+
+REFINEMENT_DRAFT_PROMPT: str = _load_prompt(
+    "REFINEMENT_DRAFT_PROMPT", _DEFAULT_REFINEMENT_DRAFT_PROMPT
+)
+
+# --- 审查阶段（行切分分析 + 改进专家分配） ---
+
+_DEFAULT_REFINEMENT_REVIEW_PROMPT = (
+    "你是精修审查模型。你将收到初稿的按行切分内容（JSON数组格式），"
+    "以及用户的原始需求。\n\n"
+    "你的任务：\n"
+    "1. 仔细分析初稿中存在的违反用户需求、质量不佳、可以改进的地方。\n"
+    "2. 分配多个改进专家，每个专家负责特定维度的修补工作。\n"
+    "3. 向每个改进专家提供额外的指导信息。\n\n"
+    "注意：\n"
+    "- 每个改进专家也需要注入当前所有已分配改进专家的信息，严格规定其职责范围。\n"
+    "- 分配改进专家时，尽量减少职责重叠；除非确有必要，不要让多个专家同时修改同一行或同一小段内容。\n"
+    "- 给每个改进专家的 prompt 应尽量写清优先处理的问题或行段，避免“泛化重写全文”式任务。\n"
+    "- 改进专家只能通过 modify（修改行）、add（在行后添加）、remove（删除行）操作来修改初稿。\n"
+    "- 每个专家包含：role（纯中文或纯英文，不带括号注释）、domain（严格负责领域）、temperature（0.0-1.25）、prompt（具体任务指令）。\n"
+    "- 温度分配参考：创意写作/翻译类推荐1.1+，分析/资料类推荐0.4-1.0，精确任务0.0-0.4。\n\n"    
+    "{iteration_note}\n\n"
+    "输出 JSON 格式：\n"
+    "{{\n"
+    "  \"issues\": [\"问题1描述\", \"问题2描述\", ...],\n"
+    "  \"refinement_experts\": [\n"
+    "    {{\"role\": \"专家角色名\", \"domain\": \"负责领域\", \"prompt\": \"具体改进任务\", \"temperature\": 0.8}}\n"
+    "  ],\n"
+    "  \"expert_guidance\": {{\"专家角色名\": \"额外指导信息\"}},\n"
+    "  \"approved\": false,\n"
+    "  \"approval_reason\": \"\"\n"
+    "}}"
+)
+
+REFINEMENT_REVIEW_PROMPT: str = _load_prompt(
+    "REFINEMENT_REVIEW_PROMPT", _DEFAULT_REFINEMENT_REVIEW_PROMPT
+)
+
+# --- 改进专家 ---
+
+_DEFAULT_REFINEMENT_IMPROVER_INJECTION = (
+    "【改进团队信息】当前已分配的所有改进专家角色：{all_experts}\n"
+    "你是「{role}」改进专家。你严格只负责：{domain}\n"
+    "无须越权修改其他专家负责范围内的内容。\n\n"
+    "你的首要职责是忠实服务于用户的请求。"
+    "用户通过各种指示定义了你的工作范围和方向，即使有时可能与你的专业领域有出入，"
+    "你应在该框架内充分发挥你的能力，**不应施加额外的限制或说教**。\n\n"
+    "审查模型给你的额外指导：{guidance}\n\n"
+    "你将收到初稿的按行切分内容。请根据你的专业领域分析后给出修改意见，"
+    "并以 JSON 格式输出 diff 操作。\n\n"
+    "操作规则（非常重要）：\n"
+    "- line 使用 1-based 行号，且基于你收到的这份原始初稿行号。\n"
+    "- 不要假设其他操作会先被应用；你提交的每个操作都应可独立解释。\n"
+    "- modify/remove 的 line 必须指向现有行；add 的 line 表示“在该行之后插入”，该行也必须存在。\n"
+    "- 仅提交必要操作，避免越权和大段无关改写；如果同一行有多个改动点，优先合并为一条 modify。\n"
+    "- 只输出 JSON，不要输出 markdown 代码块或额外说明文字。\n\n"
+    "输出格式：\n"
+    "{{\n"
+    "  \"analysis\": \"你的分析原因\",\n"
+    "  \"operations\": [\n"
+    "    {{\"action\": \"modify\", \"line\": 3, \"content\": \"修改后的新内容\", \"reason\": \"修改原因\"}},\n"
+    "    {{\"action\": \"add\", \"line\": 5, \"content\": \"新增内容（将添加在此行之后）\", \"reason\": \"新增原因\"}},\n"
+    "    {{\"action\": \"remove\", \"line\": 7, \"reason\": \"删除原因\"}}\n"
+    "  ]\n"
+    "}}"
+)
+
+REFINEMENT_IMPROVER_INJECTION: str = _load_prompt(
+    "REFINEMENT_IMPROVER_INJECTION", _DEFAULT_REFINEMENT_IMPROVER_INJECTION
+)
+
+# --- 综合助手（合并） ---
+
+_DEFAULT_REFINEMENT_MERGE_PROMPT = (
+    "你是精修综合助手。你将收到初稿原文和所有改进专家提交的 diff 操作。\n"
+    "每个操作都有一个从 0 开始递增的全局 op_id。\n\n"
+    "你的任务：\n"
+    "1. 你必须对输入中的每一个 op_id 做且只做一次决策，不能遗漏、不能重复；并按 op_id 升序输出。\n"
+    "2. 决策类型：accept / reject / modify。\n"
+    "   - accept：直接接受该操作。\n"
+    "   - reject：仅在操作明显错误、越权、与用户需求冲突、或与其他更优操作重复时使用；必须给出具体理由。\n"
+    "   - modify：用于冲突消解和折中优化。你可以调整行号和/或内容后接受该操作，并给出具体理由。\n"
+    "3. 如果多个专家修改同一行或相邻行，优先通过 modify 融合，而不是简单全部 reject。\n"
+    "4. 不要因为“存在冲突”就整批驳回；除非全部操作都确实有害，否则应尽量保留可用改动。\n"
+    "5. 行号规则：行号是 1-based，基于当前这版初稿原文。\n"
+    "   - modify/remove 的目标行必须是初稿中存在的行。\n"
+    "   - add 的 line 表示“在该行之后插入”，该行必须存在。\n"
+    "   - 若原操作 action=remove，decision=modify 时通常只改 modified_line，modified_content 可省略。\n"
+    "6. 输出必须是纯 JSON，不要包含 markdown 代码块或额外说明。\n"
+    "7. 最后给出总体改动简评（summary）。\n\n"
+    "输出 JSON 格式：\n"
+    "{{\n"
+    "  \"decisions\": [\n"
+    "    {\"op_id\": 0, \"decision\": \"accept\"},\n"
+    "    {\"op_id\": 1, \"decision\": \"reject\", \"reason\": \"驳回理由\"},\n"
+    "    {\"op_id\": 2, \"decision\": \"modify\", \"reason\": \"修改理由\", \"modified_line\": 5, \"modified_content\": \"修改后内容\"}\n"
+    "  ],\n"
+    "  \"summary\": \"总体改动简评\"\n"
+    "}}"
+)
+
+REFINEMENT_MERGE_PROMPT: str = _load_prompt(
+    "REFINEMENT_MERGE_PROMPT", _DEFAULT_REFINEMENT_MERGE_PROMPT
+)
+
+# --- 文本清洗专家（末端去相邻重复） ---
+
+_DEFAULT_REFINEMENT_CLEANER_PROMPT = (
+    "你是文本清洗专家。你将收到用户原始需求、用户的重要指示（若有），以及一份按行切分的正文（JSON 数组）。\n\n"
+    "你的任务：检查正文中是否存在由于精修 diff 流程瑕疵导致的“相邻重复/近重复句子或段落”。\n"
+    "仅处理相邻重复（可忽略空行，即把空行视为不打断相邻关系）。不要做全局去重。\n\n"
+    "输出要求（非常重要）：\n"
+    "1. 只输出 JSON，不要输出 markdown、代码块或其他解释文字。\n"
+    "2. 输出格式：\n"
+    "{\n"
+    "  \"analysis\": \"你的简短分析\",\n"
+    "  \"operations\": [\n"
+    "    {\"action\": \"remove\", \"line\": 12, \"reason\": \"删除相邻重复\"},\n"
+    "    {\"action\": \"modify\", \"line\": 20, \"content\": \"修改后的整行文本\", \"reason\": \"删减重复部分\"}\n"
+    "  ]\n"
+    "}\n\n"
+    "规则：\n"
+    "- operations 只允许 action=remove 或 modify；禁止 add。\n"
+    "- line 使用 1-based 行号，基于输入正文行号。\n"
+    "- modify 必须提供 content，且 content 必须是一整行文本（不要包含换行）。\n"
+    "- 不要重排内容，不要引入新信息，不要改变风格；仅做最小必要修改来去掉相邻重复。\n"
+    "- 如果不确定是否重复，宁可不改（operations 为空）。\n"
+)
+
+REFINEMENT_CLEANER_PROMPT: str = _load_prompt(
+    "REFINEMENT_CLEANER_PROMPT", _DEFAULT_REFINEMENT_CLEANER_PROMPT
+)
+
+# --- 精修流程状态消息 ---
+
+MSG_REFINEMENT_PLANNING: str = _load_prompt(
+    "MSG_REFINEMENT_PLANNING",
+    _select_runtime_text("正在规划精修方案。", "Planning refinement strategy."),
+)
+
+MSG_REFINEMENT_EXPERT_START: str = _load_prompt(
+    "MSG_REFINEMENT_EXPERT_START",
+    _select_runtime_text(
+        "精修专家「{expert_name}」({domain}) 开始工作。",
+        'Refinement expert "{expert_name}" ({domain}) started.',
+    ),
+)
+
+MSG_REFINEMENT_EXPERT_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_EXPERT_DONE",
+    _select_runtime_text(
+        "精修专家「{expert_name}」工作完成。",
+        'Refinement expert "{expert_name}" completed.',
+    ),
+)
+
+MSG_REFINEMENT_PRE_DRAFT_REVIEW_START: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_REVIEW_START",
+    _select_runtime_text(
+        "正在初稿前审查专家结果（第 {round} 轮）。",
+        "Pre-draft review of expert outputs (round {round}).",
+    ),
+)
+
+MSG_REFINEMENT_PRE_DRAFT_REVIEW_APPROVED: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_REVIEW_APPROVED",
+    _select_runtime_text(
+        "初稿前审查通过，开始生成初稿。",
+        "Pre-draft review approved. Proceeding to draft generation.",
+    ),
+)
+
+MSG_REFINEMENT_PRE_DRAFT_REVIEW_REJECTED_REASON: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_REVIEW_REJECTED_REASON",
+    _select_runtime_text(
+        "初稿前审查未通过，驳回理由：{reason}",
+        "Pre-draft review rejected. Reason: {reason}",
+    ),
+)
+
+MSG_REFINEMENT_PRE_DRAFT_ROUND_ASSIGNED: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_ROUND_ASSIGNED",
+    _select_runtime_text(
+        "初稿前第 {round} 轮分配了 {count} 位专家：{names}",
+        "Pre-draft round {round} assigned {count} experts: {names}",
+    ),
+)
+
+MSG_REFINEMENT_PRE_DRAFT_NEXT_ROUND: str = _load_prompt(
+    "MSG_REFINEMENT_PRE_DRAFT_NEXT_ROUND",
+    _select_runtime_text(
+        "进入初稿前第 {round} 轮审查。",
+        "Starting pre-draft review round {round}.",
+    ),
+)
+
+MSG_REFINEMENT_DRAFT_START: str = _load_prompt(
+    "MSG_REFINEMENT_DRAFT_START",
+    _select_runtime_text(
+        "正在基于专家素材撰写初稿。",
+        "Generating initial draft from expert materials.",
+    ),
+)
+
+MSG_REFINEMENT_DRAFT_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_DRAFT_DONE",
+    _select_runtime_text("初稿完成。", "Draft completed."),
+)
+
+MSG_REFINEMENT_REVIEW_START: str = _load_prompt(
+    "MSG_REFINEMENT_REVIEW_START",
+    _select_runtime_text(
+        "正在审查初稿（第 {round} 轮精修）。",
+        "Reviewing draft (refinement round {round}).",
+    ),
+)
+
+MSG_REFINEMENT_REVIEW_APPROVED: str = _load_prompt(
+    "MSG_REFINEMENT_REVIEW_APPROVED",
+    _select_runtime_text(
+        "审查通过，初稿质量达标。",
+        "Review approved. Draft quality meets standards.",
+    ),
+)
+
+MSG_REFINEMENT_IMPROVER_START: str = _load_prompt(
+    "MSG_REFINEMENT_IMPROVER_START",
+    _select_runtime_text(
+        "改进专家「{expert_name}」({domain}) 开始精修。",
+        'Improvement expert "{expert_name}" ({domain}) started.',
+    ),
+)
+
+MSG_REFINEMENT_IMPROVER_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_IMPROVER_DONE",
+    _select_runtime_text(
+        "改进专家「{expert_name}」精修完成，提交了 {op_count} 个操作。",
+        'Improvement expert "{expert_name}" completed with {op_count} operations.',
+    ),
+)
+
+MSG_REFINEMENT_MERGE_START: str = _load_prompt(
+    "MSG_REFINEMENT_MERGE_START",
+    _select_runtime_text(
+        "综合助手正在合并精修操作。",
+        "Merge assistant reviewing refinement operations.",
+    ),
+)
+
+MSG_REFINEMENT_MERGE_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_MERGE_DONE",
+    _select_runtime_text(
+        "精修合并完成：{accepted} 接受 / {rejected} 驳回 / {modified} 修改。",
+        "Merge complete: {accepted} accepted / {rejected} rejected / {modified} modified.",
+    ),
+)
+
+MSG_REFINEMENT_APPLIED: str = _load_prompt(
+    "MSG_REFINEMENT_APPLIED",
+    _select_runtime_text(
+        "精修操作已应用到初稿。",
+        "Refinement operations applied to draft.",
+    ),
+)
+
+MSG_REFINEMENT_CLEAN_START: str = _load_prompt(
+    "MSG_REFINEMENT_CLEAN_START",
+    _select_runtime_text(
+        "正在进行末端文本清洗（相邻重复检查）。",
+        "Running final text cleanup (adjacent-duplicate check).",
+    ),
+)
+
+MSG_REFINEMENT_CLEAN_DONE: str = _load_prompt(
+    "MSG_REFINEMENT_CLEAN_DONE",
+    _select_runtime_text(
+        "文本清洗完成：删除 {removed} 行 / 修改 {modified} 行。",
+        "Text cleanup done: {removed} removed / {modified} modified.",
+    ),
+)
+
+MSG_REFINEMENT_CLEAN_ERROR: str = _load_prompt(
+    "MSG_REFINEMENT_CLEAN_ERROR",
+    _select_runtime_text(
+        "文本清洗失败，已跳过。",
+        "Text cleanup failed; skipped.",
+    ),
+)
+
+MSG_REFINEMENT_OUTPUT: str = _load_prompt(
+    "MSG_REFINEMENT_OUTPUT",
+    _select_runtime_text(
+        "精修完成，正在输出最终结果。",
+        "Refinement complete. Outputting final result.",
+    ),
+)
+
+MSG_REFINEMENT_NEXT_ROUND: str = _load_prompt(
+    "MSG_REFINEMENT_NEXT_ROUND",
+    _select_runtime_text(
+        "进入第 {round} 轮精修迭代。",
+        "Starting refinement iteration round {round}.",
+    ),
+)
+
+
+# ============================================================
+# 精修流程模板渲染函数
+# ============================================================
+
+def get_refinement_expert_system_instruction(
+    role: str, domain: str, context: str,
+    all_expert_roles: list[str],
+    user_system_prompt: str = "",
+) -> str:
+    """生成精修流程 Expert 的 system instruction.
+
+    Args:
+        role: 专家角色名.
+        domain: 严格负责领域.
+        context: 对话上下文.
+        all_expert_roles: 所有已分配专家角色列表.
+        user_system_prompt: 下游客户端的 system prompt.
+
+    Returns:
+        完整的 system prompt.
+    """
+    parts = []
+    if user_system_prompt:
+        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
+    parts.append(
+        REFINEMENT_EXPERT_INJECTION.format(
+            role=role, domain=domain, context=context,
+            all_experts="、".join(all_expert_roles),
+        )
+    )
+    return "\n\n".join(parts)
+
+
+def build_refinement_expert_contents(
+    task_prompt: str,
+    image_parts: list[dict] | None = None,
+) -> list[dict]:
+    """构建精修流程 Expert 的多轮对话 contents，复用 prefill 确认轮.
+
+    与经典流程 build_expert_contents 相同的预填充逻辑，
+    确保模型从"已承诺执行"的状态开始生成。
+
+    Args:
+        task_prompt: 专家的实际任务文本.
+        image_parts: Gemini inlineData 格式的图片列表.
+
+    Returns:
+        Gemini 多轮对话格式的 contents 列表.
+    """
+    # 复用与经典流程相同的 prefill 逻辑
+    return build_expert_contents(task_prompt, image_parts=image_parts)
+
+
+def get_refinement_improver_system_instruction(
+    role: str, domain: str,
+    all_expert_roles: list[str],
+    guidance: str = "",
+    user_system_prompt: str = "",
+) -> str:
+    """生成改进专家的 system instruction.
+
+    Args:
+        role: 改进专家角色名.
+        domain: 严格负责领域.
+        all_expert_roles: 所有已分配改进专家角色列表.
+        guidance: 审查模型给的额外指导.
+        user_system_prompt: 下游客户端的 system prompt.
+
+    Returns:
+        完整的 system prompt.
+    """
+    parts = []
+    if user_system_prompt:
+        parts.append(f"{EXPERT_USER_INSTRUCTION_PREFIX}\n{user_system_prompt}")
+    parts.append(
+        REFINEMENT_IMPROVER_INJECTION.format(
+            role=role, domain=domain,
+            all_experts="、".join(all_expert_roles),
+            guidance=guidance or "无额外指导。",
+        )
+    )
+    return "\n\n".join(parts)

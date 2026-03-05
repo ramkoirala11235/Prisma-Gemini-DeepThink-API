@@ -16,6 +16,19 @@ from pydantic import BaseModel, Field
 # --- 推理引擎内部模型 ---
 
 ThinkingLevel = Literal["minimal", "low", "medium", "high"]
+PipelineMode = Literal["classic", "refinement"]
+RefinementPhase = Literal[
+    "planning",  # 规划阶段
+    "experts",  # 精修专家并行执行
+    "pre_draft_review",  # 初稿前额外审核
+    "draft",  # 初稿生成
+    "review",  # 审查初稿
+    "improvers",  # 改进专家并行执行
+    "merge",  # 综合助手合并
+    "apply",  # 应用精修到初稿
+    "cleanup",  # 末端文本清洗（去相邻重复）
+    "output",  # 输出最终结果
+]
 AppState = Literal[
     "idle", "analyzing", "experts_working", "reviewing", "synthesizing", "completed"
 ]
@@ -90,6 +103,7 @@ class DeepThinkConfig(BaseModel):
     保持 None 则沿用原有行为。
     """
 
+    mode: PipelineMode = "classic"
     planning_level: ThinkingLevel = "high"
     expert_level: ThinkingLevel = "high"
     synthesis_level: ThinkingLevel = "high"
@@ -101,6 +115,17 @@ class DeepThinkConfig(BaseModel):
     expert_temperature: Optional[float] = None
     review_temperature: Optional[float] = None
     synthesis_temperature: Optional[float] = None
+    # 开启后，对结构化 JSON 请求额外追加 prompt 级 JSON 约束（默认关闭）
+    json_via_prompt: bool = False
+    # --- 精修流程专用配置 ---
+    refinement_max_rounds: int = 2  # 精修迭代轮数
+    pre_draft_review_rounds: int = 1  # 初稿前额外审核轮数（0 表示禁用）
+    enable_json_repair: bool = False  # 是否启用 JSON 格式修复小模型
+    enable_text_cleaner: bool = True  # 是否启用末端文本清洗专家（默认启用）
+    draft_model: Optional[str] = None  # 初稿生成模型
+    review_model: Optional[str] = None  # 审查阶段模型
+    merge_model: Optional[str] = None  # 综合助手模型
+    json_repair_model: Optional[str] = None  # JSON 修复模型
 
 
 class DeepThinkCheckpoint(BaseModel):
@@ -128,6 +153,91 @@ class DeepThinkCheckpoint(BaseModel):
     started_at: int = Field(default_factory=lambda: int(time.time()))
     updated_at: int = Field(default_factory=lambda: int(time.time()))
     completed_at: int | None = None
+
+    # --- 精修流程专用字段 ---
+    pipeline_mode: PipelineMode = "classic"
+    draft_content: str = ""  # 初稿内容
+    refinement_round: int = 0  # 当前精修迭代轮数
+    refinement_phase: RefinementPhase = "planning"  # 精修细粒度阶段
+    # 精修专家输出列表，每项为 {role, domain, content}
+    refinement_expert_outputs: list[dict] = Field(default_factory=list)
+    # 改进专家结果列表，每项为 {role, analysis, operations: [...]}
+    refinement_improver_results: list[dict] = Field(default_factory=list)
+    # 综合助手合并摘要
+    refinement_merge_summary: str = ""
+
+
+# --- 精修流程数据模型 ---
+
+
+class RefinementExpertConfig(BaseModel):
+    """精修流程规划阶段的专家配置, 含互感知信息."""
+
+    role: str
+    domain: str  # 严格负责领域
+    prompt: str
+    temperature: float = 1.0
+    # 运行时注入，规划阶段无需填写
+    all_expert_roles: list[str] = Field(default_factory=list)
+
+
+class DraftLine(BaseModel):
+    """初稿按行切分后的单行."""
+
+    line: int
+    text: str
+
+
+class DiffOperation(BaseModel):
+    """改进专家的单个 diff 操作."""
+
+    op_id: int = 0  # 全局递增 ID
+    expert_role: str = ""
+    action: Literal["modify", "add", "remove"]
+    line: int
+    content: str = ""  # modify/add 时的新内容
+    reason: str = ""
+
+
+class RefinementExpertResult(BaseModel):
+    """改进专家的输出."""
+
+    role: str
+    analysis: str = ""  # 修改意见原因
+    operations: list[DiffOperation] = Field(default_factory=list)
+
+
+class MergeDecision(BaseModel):
+    """综合助手对单个 diff 操作的决策."""
+
+    op_id: int
+    decision: Literal["accept", "reject", "modify"]
+    reason: str = ""
+    # modify 时可改行数和内容
+    modified_line: int | None = None
+    modified_content: str | None = None
+
+
+class MergeResult(BaseModel):
+    """综合助手的完整输出."""
+
+    decisions: list[MergeDecision] = Field(default_factory=list)
+    summary: str = ""  # 总体改动简评
+
+
+class RefinementReviewAnalysis(BaseModel):
+    """审查模型分析结果（行级审查 + 改进专家分配）."""
+
+    issues: list[str] = Field(default_factory=list)  # 存在的问题
+    refinement_experts: list[RefinementExpertConfig] = Field(
+        default_factory=list
+    )
+    expert_guidance: dict[str, str] = Field(
+        default_factory=dict
+    )  # role -> 额外指导
+    # 精修迭代时可能通过（不分配改进专家）
+    approved: bool = False
+    approval_reason: str = ""
 
 
 # --- OpenAI 兼容 API 模型 ---

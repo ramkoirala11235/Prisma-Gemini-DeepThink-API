@@ -28,7 +28,9 @@ from config import (
     LLM_PROVIDER,
     MAX_CONTEXT_MESSAGES,
     SSE_HEARTBEAT_INTERVAL,
+    StageProviders,
     resolve_model,
+    resolve_refinement_config,
 )
 from engine.checkpoint_store import CheckpointStore
 from engine.orchestrator import run_deep_think
@@ -54,22 +56,79 @@ def _resume_hint(resume_id: str) -> str:
     )
 
 
+def _resolve_request_config(
+    model_id: str,
+) -> tuple[str, str, str, DeepThinkConfig, str, StageProviders]:
+    (
+        real_model, mgr_model, syn_model,
+        p_level, e_level, s_level,
+        model_max_rounds, provider,
+        planning_temp, expert_temp, review_temp, synthesis_temp,
+        mode,
+        json_via_prompt,
+        stage_providers,
+    ) = resolve_model(model_id)
+
+    refinement_kwargs: dict[str, Any] = {}
+    if mode == "refinement":
+        ref_cfg = resolve_refinement_config(
+            model_id, real_model, mgr_model, syn_model,
+        )
+        refinement_kwargs = {
+            "refinement_max_rounds": ref_cfg.refinement_max_rounds,
+            "pre_draft_review_rounds": ref_cfg.pre_draft_review_rounds,
+            "enable_json_repair": ref_cfg.enable_json_repair,
+            "enable_text_cleaner": ref_cfg.enable_text_cleaner,
+            "draft_model": ref_cfg.draft_model,
+            "review_model": ref_cfg.review_model,
+            "merge_model": ref_cfg.merge_model,
+            "json_repair_model": ref_cfg.json_repair_model,
+        }
+
+    config = DeepThinkConfig(
+        mode=mode,
+        planning_level=p_level,
+        expert_level=e_level,
+        synthesis_level=s_level,
+        enable_recursive_loop=ENABLE_RECURSIVE_LOOP,
+        max_rounds=model_max_rounds,
+        max_context_messages=MAX_CONTEXT_MESSAGES,
+        planning_temperature=planning_temp,
+        expert_temperature=expert_temp,
+        review_temperature=review_temp,
+        synthesis_temperature=synthesis_temp,
+        json_via_prompt=json_via_prompt,
+        **refinement_kwargs,
+    )
+    return real_model, mgr_model, syn_model, config, provider, stage_providers
+
+
 # ---------------------------------------------------------------------------
 # Request parsing helpers
 # ---------------------------------------------------------------------------
 
 def _parse_gemini_request(body: dict[str, Any]) -> tuple[
-    str, str, list[dict[str, str]], list[dict], str | None, float | None
+    str, str, list[dict[str, str]], list[dict], str | None, float | None, bool
 ]:
     """Parse a Gemini generateContent request body.
 
     Returns:
-        (model, query, history, image_parts, system_instruction, temperature)
+        (model, query, history, image_parts, system_instruction, temperature,
+         include_thoughts)
     """
     model = body.get("model", "")
     contents = body.get("contents", [])
     gen_config = body.get("generationConfig", {})
     temperature = gen_config.get("temperature")
+
+    # 提取 thinkingConfig.includeThoughts
+    # 没有 thinkingConfig -> 下游不关心思维链，默认 False
+    # 有 thinkingConfig 但没指定 includeThoughts -> 默认 True
+    thinking_config = gen_config.get("thinkingConfig")
+    if thinking_config is not None:
+        include_thoughts = thinking_config.get("includeThoughts", True)
+    else:
+        include_thoughts = False
 
     # system_instruction
     sys_instr = body.get("systemInstruction")
@@ -116,7 +175,7 @@ def _parse_gemini_request(body: dict[str, Any]) -> tuple[
         query = history[-1]["content"]
         history = history[:-1]
 
-    return model, query, history, image_parts, system_text, temperature
+    return model, query, history, image_parts, system_text, temperature, include_thoughts
 
 
 def _build_gemini_response(
@@ -261,7 +320,7 @@ async def _gemini_sse_stream(
     body: dict[str, Any],
 ) -> AsyncGenerator[str, None]:
     """Generate Gemini-native SSE stream."""
-    model_id, query, history, image_parts, system_text, temperature = (
+    model_id, query, history, image_parts, system_text, temperature, include_thoughts = (
         _parse_gemini_request(body)
     )
 
@@ -270,24 +329,13 @@ async def _gemini_sse_stream(
         return
 
     (
-        real_model, mgr_model, syn_model,
-        p_level, e_level, s_level,
-        model_max_rounds, provider,
-        planning_temp, expert_temp, review_temp, synthesis_temp,
-    ) = resolve_model(model_id)
-
-    config = DeepThinkConfig(
-        planning_level=p_level,
-        expert_level=e_level,
-        synthesis_level=s_level,
-        enable_recursive_loop=ENABLE_RECURSIVE_LOOP,
-        max_rounds=model_max_rounds,
-        max_context_messages=MAX_CONTEXT_MESSAGES,
-        planning_temperature=planning_temp,
-        expert_temperature=expert_temp,
-        review_temperature=review_temp,
-        synthesis_temperature=synthesis_temp,
-    )
+        real_model,
+        mgr_model,
+        syn_model,
+        config,
+        provider,
+        stage_providers,
+    ) = _resolve_request_config(model_id)
 
     checkpoint_store = CheckpointStore()
     resume_id = f"res_{uuid.uuid4().hex[:16]}"
@@ -304,6 +352,7 @@ async def _gemini_sse_stream(
     checkpoint.current_round = 1
     checkpoint.started_at = now
     checkpoint.updated_at = now
+    checkpoint.pipeline_mode = config.mode
     checkpoint_store.save(checkpoint)
 
     async def _persist_event(_: str, __: dict) -> None:
@@ -318,11 +367,12 @@ async def _gemini_sse_stream(
     all_grounding: list[dict] = []
 
     try:
-        # resume hint as the first thought chunk
-        hint_chunk = _build_gemini_stream_chunk(
-            thought=_resume_hint(checkpoint.resume_id),
-        )
-        yield f"data: {json.dumps(hint_chunk, ensure_ascii=False)}\n\n"
+        # resume hint as the first thought chunk (only if thoughts requested)
+        if include_thoughts:
+            hint_chunk = _build_gemini_stream_chunk(
+                thought=_resume_hint(checkpoint.resume_id),
+            )
+            yield f"data: {json.dumps(hint_chunk, ensure_ascii=False)}\n\n"
 
         async for text_chunk, thought_chunk, _phase, grounding in run_deep_think(
             query=query,
@@ -337,15 +387,18 @@ async def _gemini_sse_stream(
             resume_checkpoint=checkpoint,
             event_callback=_persist_event,
             resume_mode=False,
-            provider=provider,
+            stage_providers=stage_providers,
         ):
             if grounding:
                 all_grounding.extend(grounding)
 
-            if text_chunk or thought_chunk:
+            # 如果不需要思维链，过滤掉 thought 内容
+            effective_thought = thought_chunk if include_thoughts else ""
+
+            if text_chunk or effective_thought:
                 chunk_data = _build_gemini_stream_chunk(
                     text=text_chunk,
-                    thought=thought_chunk,
+                    thought=effective_thought,
                 )
                 yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
 
@@ -410,7 +463,7 @@ async def generate_content(model_name: str, raw_request: Request):
         json.dumps(body, ensure_ascii=False, indent=2)[:5000],
     )
 
-    model_id, query, history, image_parts, system_text, temperature = (
+    model_id, query, history, image_parts, system_text, temperature, include_thoughts = (
         _parse_gemini_request(body)
     )
 
@@ -421,24 +474,13 @@ async def generate_content(model_name: str, raw_request: Request):
         )
 
     (
-        real_model, mgr_model, syn_model,
-        p_level, e_level, s_level,
-        model_max_rounds, provider,
-        planning_temp, expert_temp, review_temp, synthesis_temp,
-    ) = resolve_model(model_id)
-
-    config = DeepThinkConfig(
-        planning_level=p_level,
-        expert_level=e_level,
-        synthesis_level=s_level,
-        enable_recursive_loop=ENABLE_RECURSIVE_LOOP,
-        max_rounds=model_max_rounds,
-        max_context_messages=MAX_CONTEXT_MESSAGES,
-        planning_temperature=planning_temp,
-        expert_temperature=expert_temp,
-        review_temperature=review_temp,
-        synthesis_temperature=synthesis_temp,
-    )
+        real_model,
+        mgr_model,
+        syn_model,
+        config,
+        provider,
+        stage_providers,
+    ) = _resolve_request_config(model_id)
 
     checkpoint_store = CheckpointStore()
     resume_id = f"res_{uuid.uuid4().hex[:16]}"
@@ -455,6 +497,7 @@ async def generate_content(model_name: str, raw_request: Request):
     checkpoint.current_round = 1
     checkpoint.started_at = now
     checkpoint.updated_at = now
+    checkpoint.pipeline_mode = config.mode
     checkpoint_store.save(checkpoint)
 
     async def _persist_event(_: str, __: dict) -> None:
@@ -467,7 +510,7 @@ async def generate_content(model_name: str, raw_request: Request):
             )
 
     full_text = ""
-    full_reasoning = _resume_hint(checkpoint.resume_id)
+    full_reasoning = _resume_hint(checkpoint.resume_id) if include_thoughts else ""
     all_grounding: list[dict] = []
 
     async for text_chunk, thought_chunk, _phase, grounding in run_deep_think(
@@ -483,10 +526,11 @@ async def generate_content(model_name: str, raw_request: Request):
         resume_checkpoint=checkpoint,
         event_callback=_persist_event,
         resume_mode=False,
-        provider=provider,
+        stage_providers=stage_providers,
     ):
         full_text += text_chunk
-        full_reasoning += thought_chunk
+        if include_thoughts:
+            full_reasoning += thought_chunk
         if grounding:
             all_grounding.extend(grounding)
 

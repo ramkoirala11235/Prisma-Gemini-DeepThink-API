@@ -19,10 +19,12 @@ from config import (
     ENABLE_RECURSIVE_LOOP,
     MAX_CONTEXT_MESSAGES,
     SSE_HEARTBEAT_INTERVAL,
+    StageProviders,
     resolve_model,
 )
 from engine.checkpoint_store import CheckpointStore, CheckpointStoreError
 from engine.orchestrator import SYNTHESIS_FALLBACK_TEXT, run_deep_think
+from prompts import REFINEMENT_FALLBACK_TEXT, RESUME_HINT_TEXT
 from models import (
     ChatCompletionChoice,
     ChatCompletionChunk,
@@ -33,7 +35,6 @@ from models import (
     DeepThinkCheckpoint,
     DeepThinkConfig,
 )
-from prompts import RESUME_HINT_TEXT
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -47,6 +48,11 @@ _ACTIVE_RESUME_IDS: set[str] = set()
 _ACTIVE_RESUME_LOCK = asyncio.Lock()
 _DISCONNECT_POLL_INTERVAL_SECONDS = 0.25
 _CLIENT_CLOSED_STATUS_CODE = 499
+
+
+def _error_response(status_code: int, message: str) -> JSONResponse:
+    logger.error("[API] HTTP %d error: %s", status_code, message)
+    return JSONResponse(status_code=status_code, content={"error": message})
 
 
 def _build_history(request: ChatCompletionRequest) -> list[dict[str, str]]:
@@ -77,18 +83,47 @@ def _extract_system_prompt(request: ChatCompletionRequest) -> str:
 
 def _resolve_request(
     request: ChatCompletionRequest,
-) -> tuple[str, str, str, DeepThinkConfig, str]:
+) -> tuple[str, str, str, DeepThinkConfig, str, "StageProviders"]:
     (
         real_model, mgr_model, syn_model,
         p_level, e_level, s_level,
         model_max_rounds, provider,
         planning_temp, expert_temp, review_temp, synthesis_temp,
+        mode,
+        json_via_prompt,
+        stage_providers,
     ) = resolve_model(request.model)
 
     if request.prisma_config:
-        return real_model, mgr_model, syn_model, request.prisma_config, provider
+        return (
+            real_model,
+            mgr_model,
+            syn_model,
+            request.prisma_config,
+            provider,
+            stage_providers,
+        )
+
+    # 精修流程额外配置
+    refinement_kwargs: dict = {}
+    if mode == "refinement":
+        from config import resolve_refinement_config
+        ref_cfg = resolve_refinement_config(
+            request.model, real_model, mgr_model, syn_model,
+        )
+        refinement_kwargs = {
+            "refinement_max_rounds": ref_cfg.refinement_max_rounds,
+            "pre_draft_review_rounds": ref_cfg.pre_draft_review_rounds,
+            "enable_json_repair": ref_cfg.enable_json_repair,
+            "enable_text_cleaner": ref_cfg.enable_text_cleaner,
+            "draft_model": ref_cfg.draft_model,
+            "review_model": ref_cfg.review_model,
+            "merge_model": ref_cfg.merge_model,
+            "json_repair_model": ref_cfg.json_repair_model,
+        }
 
     config = DeepThinkConfig(
+        mode=mode,
         planning_level=p_level,
         expert_level=e_level,
         synthesis_level=s_level,
@@ -99,8 +134,10 @@ def _resolve_request(
         expert_temperature=expert_temp,
         review_temperature=review_temp,
         synthesis_temperature=synthesis_temp,
+        json_via_prompt=json_via_prompt,
+        **refinement_kwargs,
     )
-    return real_model, mgr_model, syn_model, config, provider
+    return real_model, mgr_model, syn_model, config, provider, stage_providers
 
 
 def _parse_continue_command(
@@ -157,7 +194,8 @@ def _iter_chunks(text: str) -> list[str]:
 
 
 def _is_fallback_error_text(text: str) -> bool:
-    return (text or "").strip() == SYNTHESIS_FALLBACK_TEXT
+    stripped = (text or "").strip()
+    return stripped == SYNTHESIS_FALLBACK_TEXT or stripped == REFINEMENT_FALLBACK_TEXT
 
 
 def _resume_hint(resume_id: str) -> str:
@@ -228,7 +266,7 @@ async def _generate_sse_stream(
     checkpoint_store: CheckpointStore,
     resume_mode: bool,
     replay_only: bool,
-    provider: str = "",
+    stage_providers: StageProviders,
 ) -> AsyncGenerator[str, None]:
     """Stream OpenAI-compatible SSE chunks with optional checkpoint replay."""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -297,7 +335,7 @@ async def _generate_sse_stream(
                     resume_checkpoint=checkpoint,
                     event_callback=_persist_event,
                     resume_mode=resume_mode,
-                    provider=provider,
+                    stage_providers=stage_providers,
                 ):
                     await sse_queue.put(("data", text_chunk, thought_chunk, grounding))
             except Exception as exc:
@@ -389,17 +427,13 @@ async def chat_completions(raw_request: Request):
 
     logger.debug(
         "[API] raw request\n%s",
-        json.dumps(raw_json, ensure_ascii=False, indent=2)[:5000],
+        json.dumps(raw_json, ensure_ascii=False, indent=2)[:500000],
     )
 
     try:
         request = ChatCompletionRequest(**raw_json)
     except Exception as exc:
-        logger.error("[API] request parse failed: %s", exc)
-        return JSONResponse(
-            status_code=422,
-            content={"error": f"request parse failed: {exc}"},
-        )
+        return _error_response(422, f"request parse failed: {exc}")
 
     if request.messages and request.messages[-1].role == "assistant":
         logger.warning("[API] dropping trailing assistant prefill message")
@@ -407,19 +441,16 @@ async def chat_completions(raw_request: Request):
 
     continue_mode, resume_id, continue_error = _parse_continue_command(request)
     if continue_error:
-        return JSONResponse(status_code=400, content={"error": continue_error})
+        return _error_response(400, continue_error)
 
     query = _get_query(request).strip()
     if not query:
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"missing user query after {_CONTINUE_COMMAND} command"},
-        )
+        return _error_response(400, f"missing user query after {_CONTINUE_COMMAND} command")
 
     history = _build_history(request)
     system_prompt = _extract_system_prompt(request)
     image_parts = _extract_image_parts(request)
-    real_model, mgr_model, syn_model, config, provider = _resolve_request(request)
+    real_model, mgr_model, syn_model, config, provider, stage_providers = _resolve_request(request)
 
     checkpoint_store = CheckpointStore()
     now = int(time.time())
@@ -427,19 +458,13 @@ async def chat_completions(raw_request: Request):
     replay_only = False
     if continue_mode:
         if not resume_id:
-            return JSONResponse(
-                status_code=400,
-                content={"error": f"missing resume id for {_CONTINUE_COMMAND} command"},
-            )
+            return _error_response(400, f"missing resume id for {_CONTINUE_COMMAND} command")
         try:
             checkpoint = checkpoint_store.load(resume_id)
         except FileNotFoundError:
-            return JSONResponse(
-                status_code=404,
-                content={"error": f"checkpoint not found: {resume_id}"},
-            )
+            return _error_response(404, f"checkpoint not found: {resume_id}")
         except CheckpointStoreError as exc:
-            return JSONResponse(status_code=400, content={"error": str(exc)})
+            return _error_response(400, str(exc))
 
         # Repair legacy checkpoints that were incorrectly marked completed
         # after synthesis failures and only contain fallback error output.
@@ -457,6 +482,17 @@ async def chat_completions(raw_request: Request):
             checkpoint.output_content = ""
 
         replay_only = checkpoint.status == "completed"
+
+        # 禁止跨模式 continue
+        if checkpoint.pipeline_mode != config.mode:
+            await _release_resume_id(checkpoint.resume_id)
+            return _error_response(
+                400,
+                f"pipeline mode mismatch: checkpoint was created with "
+                f"mode='{checkpoint.pipeline_mode}' but current model uses "
+                f"mode='{config.mode}'. Cannot resume across different modes."
+            )
+
         checkpoint.request_model = request.model
         checkpoint.real_model = real_model
         checkpoint.manager_model = mgr_model
@@ -486,18 +522,15 @@ async def chat_completions(raw_request: Request):
         checkpoint.started_at = now
         checkpoint.updated_at = now
         checkpoint.completed_at = None
+        checkpoint.pipeline_mode = config.mode
         checkpoint_store.save(checkpoint)
 
     acquired = await _acquire_resume_id(checkpoint.resume_id)
     if not acquired:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": (
-                    "resume id already has an active run, wait for completion "
-                    "or disconnect before retrying"
-                )
-            },
+        return _error_response(
+            409,
+            "resume id already has an active run, wait for completion "
+            "or disconnect before retrying"
         )
 
     if request.stream:
@@ -516,7 +549,7 @@ async def chat_completions(raw_request: Request):
                 checkpoint_store=checkpoint_store,
                 resume_mode=continue_mode,
                 replay_only=replay_only,
-                provider=provider,
+                stage_providers=stage_providers,
             ),
             media_type="text/event-stream",
             headers={
@@ -555,7 +588,7 @@ async def chat_completions(raw_request: Request):
                 resume_checkpoint=checkpoint,
                 event_callback=_persist_event,
                 resume_mode=continue_mode,
-                provider=provider,
+                stage_providers=stage_providers,
             )
             disconnect_task = asyncio.create_task(
                 _wait_for_client_disconnect(raw_request)
@@ -575,10 +608,7 @@ async def chat_completions(raw_request: Request):
                         )
                         next_chunk_task.cancel()
                         await asyncio.gather(next_chunk_task, return_exceptions=True)
-                        return JSONResponse(
-                            status_code=_CLIENT_CLOSED_STATUS_CODE,
-                            content={"error": "client disconnected"},
-                        )
+                        return _error_response(_CLIENT_CLOSED_STATUS_CODE, "client disconnected")
 
                     try:
                         text_chunk, thought_chunk, _phase, grounding = next_chunk_task.result()
